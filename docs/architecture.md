@@ -151,8 +151,10 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 | 事务与一致性（R-22） | `storage/db.py` 暴露单一事务上下文，一次业务操作的所有仓储调用共用同一连接；扣减使用条件更新并校验受影响行数，不引入版本号体系 |
 | 用户只填天数（R-26、R-30） | `core/dates.py` 保留 `shelf_life_days`、把 `expiry_date` 置为 NULL、`expiry_source=user_days_unresolved`；有购买日期时另出「AI 估算」文本（不落库），没有购买日期时输出"未生成"；新鲜度分级固定为"未知" |
 | 份数缩放精度（R-27） | `core/recipe_math.py` 用单一比例换算全部相关食材，结果四舍五入保留 2 位小数并做有限性与正数校验；计件单位的整数建议由 Python 计算，仅用于展示 |
-| 需求量与实际消耗量分离（R-28） | `recipe_plan_ingredient.required_qty` 与 `confirmed_qty` 分别存储；`confirmed_qty` 来自用户输入，Services 只校验不修改 |
-| 多批次扣减（R-29） | `core/allocation.py` 把一次扣减量分摊为逐批次的扣减清单；`services/inventory_service.py` 在同一事务内逐批次条件更新并逐条写事件 |
+| 需求量与实际消耗量分离（R-28） | S6 已实现（内存结构，不落库）：`PlannedIngredient.quantity` 是菜谱计划用量；`recipe_service.apply_plan(confirmed_quantities={下标: 实际用量})` **只用用户确认的数量**扣减，未确认或确认为 0 的食材不扣减、不写事件；Services 只校验不修改用户输入 |
+| 多批次扣减（R-29） | `core/allocation.allocate()` 把一次扣减量分摊为逐批次的扣减清单；`inventory_service._change_stock()` 在同一事务内逐批次条件更新并逐条写事件（`item_id` = 批次） |
+| 确认消费的事务边界（R-22） | `recipe_service.apply_plan()` 用**外层事务**包住多食材扣减，内层 `consume()` 经 `db.transaction()` 的嵌套复用共享同一事务；任一食材扣减/事件写入/校验失败 → 全部回滚。会话级防重复（`applied_plan_ids`）+ 事件表 `plan_id` 留痕；**没有持久化规划表，应用重启或跨会话不具备全局幂等** |
+| 事件来源与规划编号（R-12、R-23） | `consume()/discard()` 新增可选 `source` / `plan_id`（默认 `manual` / `None`，手动消费行为不变）；菜谱确认传 `source="recipe_plan"` 与本次 `plan_id`（由 UUID4 派生的整数，写入现有 `inventory_event.plan_id` INTEGER 列，不需要迁移） |
 | 过敏原按批次判定（R-14） | `core/allergens.py` 逐批次读取 `allergen_status` 与 `declared_allergens`；任一被引用批次未声明且用户已声明相关过敏原，则该菜谱进入待核实 |
 
 ## 7. SQLite 结构演进策略
@@ -199,12 +201,30 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 
    分区结果：`conflict` → 已排除；`unverifiable` → 待核实区域（不作为普通推荐）；
    `none_known` → 普通推荐。**S5 不写库存、不写事件、不落库**（菜谱只存在于会话中）。
-6. `core` 在发送前清洗名称（长度限制、去除控制字符），降低提示注入风险。
-7. 校验分两层（R-21）：
+
+6. 确认实际消耗的调用链（S6 已实现）：
+
+   ```
+   pages/2_食谱规划.py（确认表单：逐食材勾选 + 实际用量 + 必要时勾选"已了解无法核实"）
+        → recipe_service.inspect_recipe_for_confirmation()   # 只读：最新库存 + 最新过敏原声明
+        → recipe_service.apply_plan(plan, recipe, confirmed_quantities, allergen_acknowledged, applied_plan_ids)
+              外层 db.transaction()
+                → 再次 _confirmation_check()（事务内重读最新库存/过敏原）
+                → 过敏原闸门：conflict 拒绝；unverifiable 需明确确认
+                → 数量校验：有限 ≥0；>0 的必须 matched 且不超过最新可用
+                → 逐个食材 inventory_service.consume(..., source="recipe_plan", plan_id=plan.plan_id)
+                     （内层事务复用外层；逐批次条件更新 + rowcount 校验 + 逐条事件）
+              全部成功才提交；页面随后把 plan_id 记入会话状态
+   ```
+
+   限制（必须明确）：防重复依赖 Streamlit 会话状态，**不是数据库级幂等**；
+   应用重启或换会话后，同一份规划可以被再次确认扣减。
+7. `core` 在发送前清洗名称（长度限制、去除控制字符），降低提示注入风险。
+8. 校验分两层（R-21）：
    - 响应级：`ai/schemas.py` 使用 pydantic 严格校验整份响应（字段齐全、禁止多余字段、类型正确）。不符合即拒绝整份响应（R-13）。
    - 菜谱级：通过响应级校验后，由 Services 逐道菜谱做业务校验（数量为有限正数、推荐理由非空、至少含一条有效食材）。不合格的菜谱被丢弃，其余合法菜谱保留并提示。
-8. 库存匹配、数量重算、缺失量计算与过敏原分流全部由 Services 配合 `core` 完成；AI 不参与数量计算，也不能决定过敏原结论（R-05、R-10）。
-9. 未匹配食材、食材不足、单位不一致属于业务处理，**不得**因此判定整份 AI 响应失败（R-19）；AI 调用本身失败时显示错误并保持库存不变。
+9. 库存匹配、数量重算、缺失量计算、过敏原分流与确认扣减全部由 Services 配合 `core` 完成；AI 不参与数量计算，也不能决定过敏原结论（R-05、R-10）。
+10. 未匹配食材、食材不足、单位不一致属于业务处理，**不得**因此判定整份 AI 响应失败（R-19）；AI 调用本身失败时显示错误并保持库存不变。
 
 ## 9. 错误处理
 
@@ -241,7 +261,9 @@ AI 配置（阶段 4）由 `config.get_ai_settings()` 统一读取：`OPENAI_API
 | 菜谱契约测试 | `tests/test_recipe_schemas.py`：合法 JSON 解析、缺字段/多余字段/非法 JSON、空名称与空列表、非法用量与份数（含布尔与小数）、代码块包裹、可读错误 |
 | 缺口计算测试 | `tests/test_recipe_math.py`：充足 / 不足 / 零库存 / 批次耗尽（已知为零）/ 同名不同单位 / 未匹配（未知≠0）/ 非法数量 / 不修改库存 / 计数 |
 | 规划服务测试 | `tests/test_recipe_service.py`：成功路径、模型的"库存充足"说法不覆盖程序计算、输出不合法、模型失败、缺配置不调用模型、库存读取失败、空库存不调用模型、三种过敏原分流、规划前后库存与事件完全不变 |
-| 规划界面测试 | `tests/test_recipe_page.py`：页面加载、未配置时提示且不生成、成功展示菜谱与缺口、失败不伪装成功、结果跨刷新保留且不重复调用模型 |
+| 规划界面测试 | `tests/test_recipe_page.py`：页面加载、未配置时提示且不生成、成功展示菜谱与缺口、失败不伪装成功、结果跨刷新保留且不重复调用模型；以及 S6 的确认表单：勾选后才扣减、未勾选不改库存、已应用规划不再提供按钮、conflict 无确认入口、unverifiable 需显式勾选、unit_mismatch 显示为不可扣减 |
+| 确认消费测试 | `tests/test_apply_plan.py`：计划用量/实际用量分离、部分确认、0 与未确认不扣减、负数/非有限/None/非数字拒绝、超量整次拒绝、规划后库存变化重算、批次耗尽按已知为零、unit_mismatch 与 unmatched 阻止、conflict 拒绝、unverifiable 需明确确认、规划身份与防重复、跨批次顺序与逐批次事件、source/plan_id 留痕、**中途失败整体回滚**、database is locked 映射、手动消费默认行为不变 |
+| 端到端测试 | `tests/test_e2e_flow.py`：录入 → 生成规划（假模型）→ 确认 → 校验库存/事件/剩余量；确认前库存变化被拦截；模型失败不改库存；同一会话重复应用被拒；`scripts/seed_demo.py` 的导入与 `--reset` |
 | 服务测试 | Services 的事务行为、AI 失败路径、库存不变性 |
 | 迁移测试 | 结构版本推进、旧库升级保数据、测试库隔离 |
 | 端到端测试 | 录入 → 规划 → 确认消耗 → 库存变化，使用 FakeClient，不调用真实 API |
@@ -286,13 +308,18 @@ AI 配置（阶段 4）由 `config.get_ai_settings()` 统一读取：`OPENAI_API
 | 3 | `core/{dates,allergens}.py`、`storage/allergen_repo.py`、`tests/{test_dates,test_allergens,test_fridge_page}.py` | `services/inventory_service.py`、`pages/1_数字冰箱.py`、`storage/schema.py`、`storage/inventory_repo.py`（批次入库必须能写 `expiry_date` / `shelf_life_days` / `declared_allergens`，见 6.1）、`config.py` |
 | 4 | `ai/{__init__,client}.py`、`services/ai_service.py`、`tests/test_ai_client.py`、`scripts/check_ai_connection.py` | `config.py`、`.env.example`、`requirements.txt` |
 | 5 | `core/recipe_math.py`、`ai/{prompts,schemas}.py`、`services/recipe_service.py`、`tests/{test_recipe_schemas,test_recipe_math,test_recipe_service,test_recipe_page}.py` | `pages/2_食谱规划.py`、`requirements.txt`（显式声明 pydantic）、`app.py`（首页文案） |
-| 6 | `scripts/seed_demo.py`、`tests/{test_apply_plan,test_e2e_flow}.py` | `services/{inventory_service,recipe_service}.py`、`pages/1_数字冰箱.py`、`pages/2_食谱规划.py`、`README.md`、`requirements.txt` |
+| 6 | `scripts/seed_demo.py`、`tests/{test_apply_plan,test_e2e_flow}.py` | `services/{inventory_service,recipe_service}.py`、`pages/2_食谱规划.py`、`tests/test_recipe_page.py`、`README.md`、`docs/{architecture,product_spec}.md` |
 
 S4 说明：`ai/schemas.py`、`ai/prompts.py` 与 `tests/test_ai_schemas.py` 推迟到 S5（S5 才需要结构化输出校验与提示词），
 以免留下空模块；`services/ai_service.py` 与 `tests/test_ai_client.py` 取代了原列表中的占位命名。
 
 S5 说明：原列表里的 `storage/recipe_repo.py` 与 `storage/schema.py` **没有创建/修改**——现行产品需求不要求持久化菜谱，
 因此本阶段只生成与展示临时结果，数据库版本保持 3，也没有新增迁移。
+
+S6 说明：**未新增迁移、未创建 `storage/recipe_repo.py`、未修改 `pages/1_数字冰箱.py`**。
+按本阶段的范围决策，规划身份与应用状态放在 Streamlit 会话中（`plan_id` 由 UUID4 派生的整数），
+菜谱确认的扣减复用现有 `inventory_service.consume()`，只新增 `source` / `plan_id` 两个可选参数
+与 `recipe_service.apply_plan()`。数据库版本仍为 3。
 
 超出白名单的文件必须先修订计划并获得批准。按上表白名单逐项相加，V1 结束时**非测试 Python 文件不超过 25 个**（含 `__init__.py` 与 `scripts/` 下的脚本），**测试文件不超过 14 个**（含 `conftest.py`）；这两个上限与白名单一致，不额外留余量。
 

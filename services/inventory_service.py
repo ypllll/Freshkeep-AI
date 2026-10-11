@@ -24,7 +24,7 @@ from core import allergens as allergen_rules
 from core import dates as date_rules
 from core.allergens import ItemAllergenView, UserAllergen
 from core.dates import ExpiryView
-from core.models import InventoryEvent, InventoryItem, StockSummaryRow
+from core.models import EVENT_SOURCES, InventoryEvent, InventoryItem, StockSummaryRow
 from core.validation import (
     normalize_name,
     validate_category,
@@ -257,8 +257,14 @@ def consume(
     name_normalized: Optional[str] = None,
     unit: Optional[str] = None,
     note: Optional[str] = None,
+    source: str = "manual",
+    plan_id: Optional[int] = None,
 ) -> List[allocation_rules.BatchAllocation]:
-    """消耗食材。未指定批次时按 §6.5 的固定顺序自动分配。"""
+    """消耗食材。未指定批次时按 §6.5 的固定顺序自动分配。
+
+    `source` / `plan_id` 供菜谱确认使用（`source="recipe_plan"` + 本次规划的编号），
+    手动消耗保持默认值不变。
+    """
     return _change_stock(
         conn,
         action=ACTION_CONSUME,
@@ -267,6 +273,8 @@ def consume(
         name_normalized=name_normalized,
         unit=unit,
         note=note,
+        source=source,
+        plan_id=plan_id,
     )
 
 
@@ -288,6 +296,8 @@ def discard(
         name_normalized=name_normalized,
         unit=unit,
         note=note,
+        source="manual",
+        plan_id=None,
     )
 
 
@@ -300,10 +310,16 @@ def _change_stock(
     name_normalized: Optional[str],
     unit: Optional[str],
     note: Optional[str],
+    source: str = "manual",
+    plan_id: Optional[int] = None,
 ) -> List[allocation_rules.BatchAllocation]:
     quantity = validate_quantity(quantity)
     clean_note = validate_notes(note)
     end_status = "consumed" if action == ACTION_CONSUME else "discarded"
+    if source not in EVENT_SOURCES:
+        raise InventoryError(f"未知的事件来源：{source}")
+    if plan_id is not None and (isinstance(plan_id, bool) or not isinstance(plan_id, int)):
+        raise InventoryError("规划编号必须是整数或为空")
 
     with db_module.transaction(conn):
         if item_id is not None:
@@ -359,7 +375,8 @@ def _change_stock(
                     qty_delta=delta,
                     qty_after=current.quantity,
                     at=timestamp,
-                    source="manual",
+                    source=source,
+                    plan_id=plan_id,
                     note=clean_note,
                 )
         return allocations
