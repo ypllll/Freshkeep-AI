@@ -39,7 +39,7 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 | Services | `services/recipe_service.py` | 组装提示词、调用 AI、分层校验结果、按最新库存匹配与重算、计算缺失与补购、按过敏原三态分流（R-17 ~ R-21） |
 | Core | `core/models.py` | 数据结构定义 |
 | Core | `core/validation.py` | 名称、数量、单位、类别、日期等输入校验（R-10） |
-| Core | `core/dates.py` | 保质期判定顺序、冲突处理（R-04）、购买日期未知的处理（R-25、R-26）、参考区间及其依据数据（R-03）、新鲜度分级 |
+| Core | `core/dates.py` | 保质期判定顺序（用户日期原样采用）、冲突处理（R-04）、购买日期留空（R-25、R-26）、通用参考区间（R-03）、只用于展示的 AI 估算（R-30）、新鲜度分级 |
 | Core | `core/allergens.py` | 归一化、内置别名表、三态判定（R-05 ~ R-08、R-14）；逐批次判定，不跨批次继承声明 |
 | Core | `core/allocation.py` | 批次消耗分配顺序（先到期先消耗、未知期限后置）、把一次扣减量分摊到多个批次的逐批次拆分、汇总与批次一致性校验（R-16、R-29） |
 | Core | `core/recipe_math.py` | 缺失量与补购数量计算、份数缩放的同一比例与 2 位小数精度规则（R-27）、单位一致性检查 |
@@ -68,7 +68,7 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 | `storage` | TEXT NOT NULL | 冷藏 / 冷冻 / 常温 / 其他 |
 | `expiry_date` | TEXT NULL | 仅存放用户提供的日期（或由用户天数换算）。无用户数据时为 NULL |
 | `shelf_life_days` | INTEGER NULL | 用户提供的天数原值，用于追溯冲突（R-04） |
-| `expiry_source` | TEXT NOT NULL | `user_date` / `user_days` / `user_days_unresolved` / `unknown`；`user_days_unresolved` 表示用户提供了天数但购买日期未知，此时 `expiry_date` 必须为 NULL 且新鲜度分级为"未知"（R-26） |
+| `expiry_source` | TEXT NOT NULL | 正式有效期日期的出处：`user_date`（用户填写的日期）/ `user_days_unresolved`（用户只给了天数、没有正式日期，此时 `expiry_date` 必须为 NULL）/ `user_days`（历史数据：旧版本按天数换算过日期）/ `unknown`（没有任何用户期限数据）。**AI 估算不落库**，因此没有对应取值。展示时以本列为准，不重新推算 |
 | `allergen_status` | TEXT NOT NULL | `declared` / `unknown` |
 | `declared_allergens` | TEXT NULL | JSON 数组；未声明时保持 NULL 而非空数组 |
 | `notes` | TEXT NULL | 备注 |
@@ -122,7 +122,9 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 
 ### 6.5 不落库的数据
 
-参考区间是纯函数输出：由 `category + storage + purchased_on` 计算得到，不写入数据库。理由：一旦落库，就有被误读为用户数据或确定到期日的风险（R-03）。
+参考区间与 AI 估算都是纯函数输出：参考区间由 `(category, storage)` 查表得到；AI 估算在此之上
+用 `purchased_on` 换算成估算日期区间（缺少购买日期则不生成）。两者都**不写入数据库**。
+理由：一旦落库，就有被误读为用户数据或确定到期日的风险（R-03、R-30）。
 
 参考期限数据本身（`(category, storage) → (天数下限, 天数上限, 依据文案)`）作为模块级常量保存在 `core/dates.py`，属于日期领域逻辑；`config.py` 不保存同一份数据的副本，只保存 `DUE_SOON_DAYS = 2` 等固定业务常量与运行参数。
 
@@ -131,15 +133,17 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 | 规则 | 落地方式 |
 |---|---|
 | 用户日期与用户天数冲突（R-04） | `core/dates.py` 在两者结果不一致时采用具体日期作为正式记录（写入 `expiry_date`，`expiry_source=user_date`），保留 `shelf_life_days` 原值，并返回冲突标记供 UI 提示"信息冲突" |
-| 参考区间不得伪装（R-03） | 参考区间不写入任何字段，只在渲染时由 `core/dates.py` 输出区间与依据；UI 必须同时渲染"参考信息，非食品安全保证"；无用户数据时新鲜度分级固定为"未知" |
+| 参考区间不得伪装（R-03） | 参考区间不写入任何字段，只在渲染时输出**通用**天数区间与依据（不换算成日期）；UI 必须同时渲染"参考信息，非食品安全保证"；无正式期限时新鲜度分级固定为"未知" |
+| AI 估算只展示（R-30） | `core/dates.ai_estimate()` 只产出展示文本：没有正式期限且有购买日期时才生成，否则输出"未生成（缺少购买日期…）"；UI 必须与「参考信息」分列并带"不是食品安全保证"；`expiry_date` 永远只存用户填写的日期 |
+| 展示以库中来源为准（R-01、R-30） | `services/inventory_service._build_view()` 把 `item.expiry_source` 作为 `stored_source` 传给 `core/dates.build_expiry_view()`，避免把系统换算出来的日期重新标成"用户提供" |
 | 成分无法核实不得当作普通推荐（R-07） | `core/allergens.py` 输出 `unverifiable` 时，`services/recipe_service.py` 把该菜谱与普通推荐分流，写入独立区域的展示数据；`recipe_plan_ingredient.allergen_state` 固化该判定 |
-| 购买日期未知（R-25） | `purchased_on` 允许 NULL；`purchase_date_defaulted` 记录是否采用默认值；`core/dates.py` 在购买日期未知时只输出"未知"，不做任何推算 |
+| 购买日期留空（R-25、R-26） | `purchased_on` 允许 NULL（任何录入模式都允许留空）；`purchase_date_defaulted` 记录是否采用了界面预填的今天；购买日期为空时不生成 AI 估算，也不做任何推算 |
 | 批次独立（R-15） | `inventory_item` 一行即一个批次，入库一律 INSERT；`storage/inventory_repo.py` 提供按 `name_normalized` + `unit` 聚合的汇总查询 |
 | 批次分配可解释（R-16） | `core/allocation.py` 输出确定性的分配结果（先到期先消耗、期限未知后置、同序按购买日期与 id）；Services 据此在同一事务内逐批次更新并写事件 |
 | 未知不等于 0（R-19） | 未匹配食材的 `available_qty` 与 `missing_qty` 写 NULL 且 `quantity_state=unknown`；所有汇总额外过滤 `quantity_state='known'`。已知为零（记录可确认当前无剩余，含批次全部耗尽）写 0 且 `quantity_state='known'`，照常参与缺口与补购计算，不得因为"没有活动批次"就改写为 unknown |
 | 选择后重算（R-17） | `services/recipe_service.py` 在用户选定菜谱时重新读取库存并重算缺口，不使用生成规划时缓存的数量 |
 | 事务与一致性（R-22） | `storage/db.py` 暴露单一事务上下文，一次业务操作的所有仓储调用共用同一连接；扣减使用条件更新并校验受影响行数，不引入版本号体系 |
-| 购买日期未知 + 用户天数（R-26） | `core/dates.py` 保留 `shelf_life_days`、把 `expiry_date` 置为 NULL、`expiry_source=user_days_unresolved`，不假定购买日期为今天；新鲜度分级固定为"未知" |
+| 用户只填天数（R-26、R-30） | `core/dates.py` 保留 `shelf_life_days`、把 `expiry_date` 置为 NULL、`expiry_source=user_days_unresolved`；有购买日期时另出「AI 估算」文本（不落库），没有购买日期时输出"未生成"；新鲜度分级固定为"未知" |
 | 份数缩放精度（R-27） | `core/recipe_math.py` 用单一比例换算全部相关食材，结果四舍五入保留 2 位小数并做有限性与正数校验；计件单位的整数建议由 Python 计算，仅用于展示 |
 | 需求量与实际消耗量分离（R-28） | `recipe_plan_ingredient.required_qty` 与 `confirmed_qty` 分别存储；`confirmed_qty` 来自用户输入，Services 只校验不修改 |
 | 多批次扣减（R-29） | `core/allocation.py` 把一次扣减量分摊为逐批次的扣减清单；`services/inventory_service.py` 在同一事务内逐批次条件更新并逐条写事件 |
@@ -198,7 +202,8 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 
 | 层次 | 范围 |
 |---|---|
-| 单元测试 | Core 的校验、日期判定与购买日期未知、参考区间、过敏原三态、批次分配顺序、缺失量与份数缩放计算 |
+| 单元测试 | Core 的校验、日期判定与购买日期留空、参考区间、AI 估算、过敏原三态、批次分配顺序、缺失量与份数缩放计算 |
+| 界面测试 | `tests/test_fridge_page.py`：用 Streamlit `AppTest` 驱动真实页面，断言购买日期可留空、AI 估算单独展示、有效期保持未知、冲突提示在刷新后仍可见 |
 | 服务测试 | Services 的事务行为、AI 失败路径、库存不变性 |
 | 迁移测试 | 结构版本推进、旧库升级保数据、测试库隔离 |
 | 端到端测试 | 录入 → 规划 → 确认消耗 → 库存变化，使用 FakeClient，不调用真实 API |
@@ -215,14 +220,16 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 - 非法 AI 输出全部被拒绝（R-13）。
 - 同名食材多次入库产生多条独立批次，汇总库存恒等于批次之和，且汇总不会把不同单位合并（R-15）。
 - 批次分配规则可复现：先到期先消耗、期限未知的批次排在已知期限之后、不伪造到期日期（R-16）。
-- 购买日期未知时 `purchased_on` 为 NULL，默认当天时 `purchase_date_defaulted = 1`（R-25）。
+- 购买日期留空时 `purchased_on` 为 NULL 且 `purchase_date_defaulted = 0`（R-25）。
 - 未匹配食材的 `available_qty` 与 `missing_qty` 为 NULL 且不进入缺口与补购汇总（R-19）。
 - 同名食材的批次全部消耗或丢弃后：`quantity_state='known'`、现有量为 0、缺口等于需求量，正常给出补购建议；只有从未匹配到记录时才为 unknown（R-19）。
 - 用户选择菜谱后按最新库存重算：库存变化后缺口随之变化（R-17）。
 - 份数缩放后所有相关食材按比例同步变化，非法数量被拒绝（R-18）。
 - 整份响应级校验失败被拒绝；单道菜谱业务错误只丢弃该菜谱且其余保留（R-21）。
 - 确认消耗时库存不足则整体回滚，库存与事件表均无变化（R-22、R-24）。
-- 购买日期未知且只提供天数时：保留 `shelf_life_days`、`expiry_date` 为 NULL、`expiry_source='user_days_unresolved'`、新鲜度分级为"未知"，且不出现任何按当天推算的日期（R-26）。
+- 只填天数时：保留 `shelf_life_days`、`expiry_date` 为 NULL、`expiry_source='user_days_unresolved'`、新鲜度分级为"未知"，且不出现任何按天数换算出来的正式日期（R-26、R-30）。
+- AI 估算不落库：有正式期限时不生成估算；无购买日期时不生成估算日期；估算文本必须带"AI 估算"与免责说明（R-30）。
+- 展示来源与库中 `expiry_source` 一致（含历史 `user_days` 行不得被标成"用户提供"）；日期/天数冲突提示在刷新后仍可见（R-01、R-04）。
 - 份数缩放：所有相关食材按同一比例换算，结果保留 2 位小数；计件单位另给出整数建议但不改写记录值；非法缩放值被拒绝（R-27）。
 - 需求量与实际消耗量分离：用户只确认部分食材时，未确认食材对应的批次数量完全不变（R-28）。
 - 多批次扣减：一次扣减跨多个批次时逐批次正确扣减并逐条写事件，事件 `qty_delta` 之和等于扣减总量；任一批次失败则整体回滚（R-29）。
@@ -238,7 +245,7 @@ ai/                 AI        模型调用、提示词、结构化输出解析
 | 0 | `README.md`、`docs/product_spec.md`、`docs/architecture.md` | 无 |
 | 1 | `app.py`、`config.py`、`storage/{__init__,db,schema}.py`、`pages/{1_数字冰箱,2_食谱规划}.py`、`requirements.txt`、`.env.example`、`.gitignore`、`tests/{conftest,test_db,test_schema_migration}.py` | `README.md` |
 | 2 | `core/{__init__,models,validation,allocation}.py`、`services/{__init__,inventory_service}.py`、`storage/inventory_repo.py`、`tests/{test_validation,test_inventory_service,test_allocation}.py` | `pages/1_数字冰箱.py`、`storage/schema.py` |
-| 3 | `core/{dates,allergens}.py`、`storage/allergen_repo.py`、`tests/{test_dates,test_allergens}.py` | `services/inventory_service.py`、`pages/1_数字冰箱.py`、`storage/schema.py`、`config.py` |
+| 3 | `core/{dates,allergens}.py`、`storage/allergen_repo.py`、`tests/{test_dates,test_allergens,test_fridge_page}.py` | `services/inventory_service.py`、`pages/1_数字冰箱.py`、`storage/schema.py`、`storage/inventory_repo.py`（批次入库必须能写 `expiry_date` / `shelf_life_days` / `declared_allergens`，见 6.1）、`config.py` |
 | 4 | `ai/{__init__,schemas,client,prompts}.py`、`tests/test_ai_schemas.py`、`scripts/check_ai_connection.py` | `config.py`、`.env.example`、`requirements.txt` |
 | 5 | `core/recipe_math.py`、`services/recipe_service.py`、`storage/recipe_repo.py`、`tests/{test_recipe_math,test_recipe_service}.py` | `pages/2_食谱规划.py`、`storage/schema.py` |
 | 6 | `scripts/seed_demo.py`、`tests/{test_apply_plan,test_e2e_flow}.py` | `services/{inventory_service,recipe_service}.py`、`pages/1_数字冰箱.py`、`pages/2_食谱规划.py`、`README.md`、`requirements.txt` |

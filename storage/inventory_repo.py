@@ -35,8 +35,11 @@ def insert_batch(
     notes: Optional[str],
     created_at: str,
     updated_at: str,
+    expiry_date: Optional[str] = None,
+    shelf_life_days: Optional[int] = None,
     expiry_source: str = "unknown",
     allergen_status: str = "unknown",
+    declared_allergens: Optional[str] = None,
 ) -> int:
     """新增一条批次记录（R-15：永远 INSERT，不覆盖旧记录）。"""
     cursor = conn.execute(
@@ -44,9 +47,10 @@ def insert_batch(
         INSERT INTO inventory_item (
             name, name_normalized, category, quantity, unit,
             purchased_on, purchase_date_defaulted, storage,
-            expiry_source, allergen_status, notes, status,
+            expiry_date, shelf_life_days, expiry_source,
+            allergen_status, declared_allergens, notes, status,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
         """,
         (
             name,
@@ -57,8 +61,11 @@ def insert_batch(
             purchased_on,
             1 if purchase_date_defaulted else 0,
             storage,
+            expiry_date,
+            shelf_life_days,
             expiry_source,
             allergen_status,
+            declared_allergens,
             notes,
             created_at,
             updated_at,

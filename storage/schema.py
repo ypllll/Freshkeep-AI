@@ -83,9 +83,21 @@ CREATE TABLE IF NOT EXISTS inventory_event (
 """
 
 
+# 结构版本 3：用户过敏原清单（docs/architecture.md 第 6.4 节、product_spec R-05）。
+USER_ALLERGEN_DDL = """
+CREATE TABLE IF NOT EXISTS user_allergen (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name    TEXT    NOT NULL,
+    name_normalized TEXT    NOT NULL UNIQUE,
+    created_at      TEXT    NOT NULL
+)
+"""
+
+
 MIGRATIONS: List[Migration] = [
     (1, [create_table_if_not_exists(INVENTORY_ITEM_DDL)]),
     (2, [create_table_if_not_exists(INVENTORY_EVENT_DDL)]),
+    (3, [create_table_if_not_exists(USER_ALLERGEN_DDL)]),
 ]
 
 SCHEMA_VERSION = max(version for version, _ in MIGRATIONS)

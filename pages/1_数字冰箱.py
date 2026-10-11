@@ -19,6 +19,28 @@ from services import inventory_service
 
 ACTION_LABELS = {"消耗": inventory_service.ACTION_CONSUME, "丢弃": inventory_service.ACTION_DISCARD}
 
+# 入库表单的控件键；保存成功后清空，避免把上一批的值误当成本批数据
+ADD_FORM_KEYS = (
+    "add_name",
+    "add_quantity",
+    "add_shelf_days",
+    "add_allergen_text",
+    "add_notes",
+    "add_has_expiry_date",
+    "add_allergen_declared",
+    "add_know_purchase_date",
+    "add_expiry_date",
+    "add_purchase_date",
+    "add_category",
+    "add_unit",
+    "add_storage",
+)
+
+
+def _clear_add_form() -> None:
+    for key in ADD_FORM_KEYS:
+        st.session_state.pop(key, None)
+
 
 def _flash(kind: str, message: str, table: Optional[list] = None) -> None:
     st.session_state["_flash"] = {"kind": kind, "message": message, "table": table}
@@ -59,20 +81,28 @@ def _summary_rows(summaries: Sequence[StockSummaryRow]) -> list:
     ]
 
 
-def _batch_rows(batches: Sequence[InventoryItem]) -> list:
+def _batch_rows(views: Sequence[inventory_service.BatchView]) -> list:
     return [
         {
-            "批次 ID": item.id,
-            "食材": item.name,
-            "数量": item.quantity,
-            "单位": item.unit,
-            "购买日期": item.purchased_on or "未知",
-            "购买日期为默认值": "是" if item.purchase_date_defaulted else "否",
-            "储存": item.storage,
-            "状态": item.status,
-            "入库时间": item.created_at,
+            "批次 ID": view.item.id,
+            "食材": view.item.name,
+            "数量": view.item.quantity,
+            "单位": view.item.unit,
+            "购买日期": view.item.purchased_on or "未知",
+            "购买日期为默认值": "是" if view.item.purchase_date_defaulted else "否",
+            "储存": view.item.storage,
+            "保质期": view.expiry.formal_text,
+            "期限来源": view.expiry.source_label,
+            "新鲜度": view.expiry.status_label,
+            "参考信息": view.expiry.reference_text or "—",
+            "AI 估算": view.expiry.ai_estimate_text or "—",
+            "过敏原": view.allergen.status_label,
+            "过敏原说明": view.allergen.message,
+            "提示": view.expiry.warning or "—",
+            "状态": view.item.status,
+            "入库时间": view.item.created_at,
         }
-        for item in batches
+        for view in views
     ]
 
 
@@ -119,13 +149,22 @@ def _render_overview(conn: sqlite3.Connection) -> None:
     labels = [f"{row.name}（{row.unit}）" for row in summaries]
     chosen = st.selectbox("查看批次明细", labels, key="overview_batch")
     row = summaries[labels.index(chosen)]
-    batches = inventory_service.list_batches(
+    views = inventory_service.list_batch_views(
         conn, name_normalized=row.name_normalized, unit=row.unit
     )
-    st.dataframe(_batch_rows(batches), use_container_width=True, hide_index=True)
+    st.dataframe(_batch_rows(views), use_container_width=True, hide_index=True)
+    st.caption(
+        "保质期只采用你填写的日期；「参考信息」是通用经验区间，「AI 估算」是针对该批次的"
+        "系统估算，两者都不是食品安全保证，也不会写成正式有效期。"
+        "过敏原判定按批次独立进行；「未发现已知冲突」不代表安全。"
+    )
 
 
 def _render_add(conn: sqlite3.Connection) -> None:
+    # 提交成功后清空表单：必须在创建控件之前执行
+    if st.session_state.pop("_reset_add_form", False):
+        _clear_add_form()
+
     st.subheader("入库（每次购买新增独立批次）")
     mode = st.radio(
         "入库方式",
@@ -135,36 +174,60 @@ def _render_add(conn: sqlite3.Connection) -> None:
     )
     initial = mode == "首次录入已有食材"
 
+    # 这些开关决定后续渲染哪些控件，必须放在表单外：
+    # 表单内的控件只在提交时才把值传回脚本，勾选后不会立即生效。
+    know_purchase_date = st.checkbox(
+        "我知道购买日期（不勾选则留空；系统不会默认填今天）", key="add_know_purchase_date"
+    )
+    purchase_date: Optional[date] = None
+    defaulted = False
+    if know_purchase_date:
+        chosen_date = st.date_input("购买日期", value=date.today(), key="add_purchase_date")
+        purchase_date = chosen_date
+        # 仍然等于系统预填的今天，说明用户没有改动这个默认值
+        defaulted = chosen_date == date.today()
+
+    has_expiry_date = st.checkbox(
+        "我知道明确的有效期日期（不勾选则正式期限保持未知）", key="add_has_expiry_date"
+    )
+    expiry_date_value: Optional[date] = None
+    if has_expiry_date:
+        expiry_date_value = st.date_input(
+            "保质期日期", value=date.today(), key="add_expiry_date"
+        )
+
+    allergen_declared = st.checkbox(
+        "我确认这一批次的成分信息（已知过敏原）", key="add_allergen_declared"
+    )
+
     with st.form("add_batch_form"):
         name = st.text_input("食材名称", key="add_name")
         col1, col2, col3 = st.columns(3)
         with col1:
-            category = st.selectbox("类别", list(CATEGORIES))
+            category = st.selectbox("类别", list(CATEGORIES), key="add_category")
         with col2:
-            unit = st.selectbox("单位", list(UNITS))
+            unit = st.selectbox("单位", list(UNITS), key="add_unit")
         with col3:
-            storage = st.selectbox("储存方式", list(STORAGE_KINDS))
+            storage = st.selectbox("储存方式", list(STORAGE_KINDS), key="add_storage")
         quantity = st.number_input("数量", value=1.0, step=0.5, format="%g", key="add_quantity")
-
-        if initial:
-            purchase_unknown = st.checkbox(
-                "购买日期未知（盘点冰箱已有食材时常见）", key="add_unknown_date"
-            )
-            purchase_date: Optional[date] = None
-            defaulted = False
-            if not purchase_unknown:
-                purchase_date = st.date_input("购买日期", value=date.today())
-        else:
-            use_today = st.checkbox("购买日期为今天（默认值，可取消后填写具体日期）", value=True)
-            defaulted = use_today
-            purchase_date = date.today() if use_today else st.date_input("购买日期", value=date.today())
-
+        st.caption(
+            "保质期只记录你提供的信息：只填天数不会生成正式有效期。"
+            "没有明确有效期时，系统最多给出「AI 估算」，仅供参考，不是食品安全保证。"
+            "过敏原默认标记为「未声明」。"
+        )
+        shelf_days_text = st.text_input(
+            "保质期天数（可选，填写整数天数）", key="add_shelf_days"
+        )
+        allergen_text = st.text_input(
+            "该批次含有的过敏原（用逗号分隔；已声明但确实不含可留空）",
+            key="add_allergen_text",
+        )
         notes = st.text_input("备注（可选）", key="add_notes")
         submitted = st.form_submit_button("保存批次", key="add_submit")
 
     if submitted:
         def _add() -> Tuple[str, Optional[list]]:
-            inventory_service.add_batch(
+            item_id = inventory_service.add_batch(
                 conn,
                 name=name,
                 category=category,
@@ -174,9 +237,20 @@ def _render_add(conn: sqlite3.Connection) -> None:
                 purchased_on=purchase_date,
                 purchase_date_defaulted=defaulted,
                 notes=notes,
+                expiry_date=expiry_date_value,
+                shelf_life_days=shelf_days_text,
+                declared_allergens=allergen_text,
+                allergen_declared=allergen_declared,
                 initial=initial,
             )
-            return f"已入库：{name.strip()}（新增独立批次）", None
+            view = inventory_service.get_batch_view(conn, item_id)
+            message = f"已入库：{name.strip()}（新增独立批次）"
+            if view.expiry.warning:
+                message += f"\n\n提示：{view.expiry.warning}"
+            if view.expiry.ai_estimate_text:
+                message += f"\n\n{view.expiry.ai_estimate_text}"
+            st.session_state["_reset_add_form"] = True
+            return message, None
 
         _run(_add)
 
@@ -288,14 +362,56 @@ def _render_events(conn: sqlite3.Connection) -> None:
     st.caption("数量变化 = 变更后数量 − 变更前数量：入库为正，消耗与丢弃为负，修改数量记录差值。")
 
 
+def _render_allergens(conn: sqlite3.Connection) -> None:
+    st.subheader("我的过敏原清单")
+    st.caption("清单用于判定库存批次的过敏原状态；判定由 Python 完成，不依赖 AI。")
+
+    with st.form("add_allergen_form"):
+        raw_name = st.text_input("新增过敏原（例如：花生、牛奶、大豆）", key="allergen_new")
+        add_submitted = st.form_submit_button("加入清单", key="allergen_submit")
+    if add_submitted:
+        def _add_allergen() -> Tuple[str, Optional[list]]:
+            inventory_service.add_user_allergen(conn, raw_name)
+            return f"已加入过敏原清单：{raw_name.strip()}", None
+
+        _run(_add_allergen)
+
+    allergens = inventory_service.list_user_allergens(conn)
+    if not allergens:
+        st.info("清单为空：此时只标记食材「成分未声明」，不做冲突判定。")
+        return
+
+    st.dataframe(
+        [
+            {"ID": entry.id, "过敏原": entry.display_name, "加入时间": entry.created_at}
+            for entry in allergens
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    labels = [f"#{entry.id} {entry.display_name}" for entry in allergens]
+    with st.form("remove_allergen_form"):
+        chosen = st.selectbox("移除过敏原", labels, key="allergen_remove_choice")
+        remove_submitted = st.form_submit_button("从清单移除", key="allergen_remove_submit")
+    if remove_submitted:
+        target = allergens[labels.index(chosen)]
+
+        def _remove_allergen() -> Tuple[str, Optional[list]]:
+            inventory_service.remove_user_allergen(conn, target.id)
+            return f"已从清单移除：{target.display_name}", None
+
+        _run(_remove_allergen)
+
+
 st.title("数字冰箱")
 st.caption("每次购买都会新增独立批次；未指定批次时按固定顺序自动分配。")
 _show_flash()
 
 connection = inventory_service.open_connection()
 try:
-    tab_overview, tab_add, tab_change, tab_events = st.tabs(
-        ["库存总览", "入库", "消耗 / 丢弃 / 修改", "事件记录"]
+    tab_overview, tab_add, tab_change, tab_allergens, tab_events = st.tabs(
+        ["库存总览", "入库", "消耗 / 丢弃 / 修改", "过敏原清单", "事件记录"]
     )
     with tab_overview:
         _render_overview(connection)
@@ -303,6 +419,8 @@ try:
         _render_add(connection)
     with tab_change:
         _render_change(connection)
+    with tab_allergens:
+        _render_allergens(connection)
     with tab_events:
         _render_events(connection)
 finally:

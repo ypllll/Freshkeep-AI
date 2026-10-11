@@ -143,21 +143,25 @@ def test_initial_entry_uses_initial_add_and_allows_unknown_purchase_date(db_conn
     assert events_of(db_conn, item_id)[0].action == "initial_add"
 
 
-def test_new_purchase_requires_purchase_date(db_conn) -> None:
-    with pytest.raises(ValidationError):
-        inventory_service.add_batch(
-            db_conn,
-            name="番茄",
-            category="蔬菜",
-            quantity=1,
-            unit="个",
-            storage="冷藏",
-            purchased_on=None,
-            initial=False,
-            today=TODAY,
-        )
+@pytest.mark.parametrize("initial", [False, True])
+def test_purchase_date_may_be_left_blank_in_every_mode(db_conn, initial: bool) -> None:
+    """购买日期由用户主动填写，允许留空；留空时不得默认今天。"""
+    item_id = inventory_service.add_batch(
+        db_conn,
+        name="白菜",
+        category="蔬菜",
+        quantity=1,
+        unit="个",
+        storage="冷藏",
+        purchased_on=None,
+        initial=initial,
+        today=TODAY,
+    )
 
-    assert inventory_service.list_summary(db_conn) == []
+    item = inventory_service.get_batch(db_conn, item_id)
+    assert item.purchased_on is None
+    assert item.purchase_date_defaulted is False
+    assert item.expiry_date is None
 
 
 def test_defaulted_purchase_date_is_visible_in_record(db_conn) -> None:
@@ -443,3 +447,95 @@ def test_data_survives_reconnect(tmp_db_path) -> None:
         assert len(events_of(second, item_id)) == 2
     finally:
         second.close()
+
+
+# --- 日期规则变更后的回归（AI 估算只展示、不落库） --------------------------
+
+
+def test_days_only_batch_keeps_expiry_empty_and_shows_labelled_estimate(db_conn) -> None:
+    second_id = inventory_service.add_batch(
+        db_conn,
+        name="酸奶",
+        category="蛋奶",
+        quantity=1,
+        unit="盒",
+        storage="冷藏",
+        purchased_on="2026-10-01",
+        shelf_life_days=7,
+        today=TODAY,
+    )
+
+    item = inventory_service.get_batch(db_conn, second_id)
+    assert item.expiry_date is None, "系统不得把天数换算成正式有效期并落库"
+    assert item.shelf_life_days == 7, "用户输入的天数必须保留"
+    assert item.expiry_source == "user_days_unresolved"
+
+    view = inventory_service.get_batch_view(db_conn, second_id, today=TODAY)
+    assert view.expiry.formal_text.startswith("未知")
+    assert view.expiry.ai_estimate_text is not None
+    assert view.expiry.ai_estimate_text.startswith("AI 估算")
+    # 蛋奶 / 冷藏 的经验区间为 5–21 天，估算窗口基于购买日期 2026-10-01
+    assert "2026-10-06" in view.expiry.ai_estimate_text
+    assert "2026-10-22" in view.expiry.ai_estimate_text
+    assert view.expiry.status == "unknown"
+
+
+def test_reading_inventory_does_not_rewrite_date_fields(db_conn) -> None:
+    item_id = inventory_service.add_batch(
+        db_conn,
+        name="罐头",
+        category="熟食",
+        quantity=1,
+        unit="盒",
+        storage="常温",
+        purchased_on="2026-10-01",
+        expiry_date="2027-04-01",
+        shelf_life_days=180,
+        today=TODAY,
+    )
+    before = inventory_service.get_batch(db_conn, item_id)
+
+    for _ in range(3):
+        inventory_service.list_batch_views(db_conn, today=TODAY)
+
+    after = inventory_service.get_batch(db_conn, item_id)
+    assert (after.expiry_date, after.shelf_life_days, after.expiry_source) == (
+        before.expiry_date,
+        before.shelf_life_days,
+        before.expiry_source,
+    )
+
+
+def test_estimate_only_batch_does_not_jump_the_allocation_queue(db_conn) -> None:
+    """AI 估算不是"用户提供的期限"，不得让它插到有用户日期的批次前面。"""
+    dated_id = inventory_service.add_batch(
+        db_conn,
+        name="午餐肉",
+        category="熟食",
+        quantity=1,
+        unit="盒",
+        storage="常温",
+        purchased_on="2026-10-01",
+        expiry_date="2027-01-01",
+        today=TODAY,
+    )
+    estimate_only_id = inventory_service.add_batch(
+        db_conn,
+        name="午餐肉",
+        category="熟食",
+        quantity=1,
+        unit="盒",
+        storage="常温",
+        purchased_on="2026-10-01",
+        shelf_life_days=7,
+        today=TODAY,
+    )
+
+    allocations = inventory_service.consume(
+        db_conn, quantity=1, name_normalized=normalize_name("午餐肉"), unit="盒"
+    )
+
+    assert [a.item_id for a in allocations] == [dated_id]
+    assert (
+        inventory_service.get_batch(db_conn, estimate_only_id).quantity == pytest.approx(1.0)
+    )
