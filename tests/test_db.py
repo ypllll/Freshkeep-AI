@@ -60,7 +60,7 @@ def test_connect_creates_parent_directory(tmp_path: Path) -> None:
 def test_ensure_schema_creates_tables_and_sets_version(conn: sqlite3.Connection) -> None:
     applied = db_module.ensure_schema(conn)
 
-    assert applied == [1]
+    assert applied == list(range(1, schema_module.SCHEMA_VERSION + 1))
     assert db_module.get_user_version(conn) == schema_module.SCHEMA_VERSION
     tables = {
         row[0]
@@ -92,7 +92,7 @@ def test_ensure_schema_rejects_database_newer_than_code(conn: sqlite3.Connection
 def test_initialize_database_creates_and_migrates(tmp_db_path: Path) -> None:
     applied = db_module.initialize_database(tmp_db_path)
 
-    assert applied == [1]
+    assert applied == list(range(1, schema_module.SCHEMA_VERSION + 1))
     assert tmp_db_path.exists()
 
     connection = db_module.connect(tmp_db_path)

@@ -66,8 +66,26 @@ def add_column_if_missing(table: str, column: str, declaration: str) -> Migratio
     return _apply
 
 
+# 结构版本 2：库存事件表。所有库存数量变化都必须在此留痕
+# （docs/architecture.md 第 6.2 节、product_spec R-12 / R-23 / R-29）。
+INVENTORY_EVENT_DDL = """
+CREATE TABLE IF NOT EXISTS inventory_event (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id   INTEGER NOT NULL REFERENCES inventory_item(id),
+    action    TEXT    NOT NULL,
+    qty_delta REAL    NOT NULL,
+    qty_after REAL    NOT NULL,
+    source    TEXT    NOT NULL DEFAULT 'manual',
+    plan_id   INTEGER NULL,
+    at        TEXT    NOT NULL,
+    note      TEXT    NULL
+)
+"""
+
+
 MIGRATIONS: List[Migration] = [
     (1, [create_table_if_not_exists(INVENTORY_ITEM_DDL)]),
+    (2, [create_table_if_not_exists(INVENTORY_EVENT_DDL)]),
 ]
 
 SCHEMA_VERSION = max(version for version, _ in MIGRATIONS)
