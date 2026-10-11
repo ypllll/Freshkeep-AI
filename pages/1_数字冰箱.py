@@ -201,7 +201,8 @@ def _render_add(conn: sqlite3.Connection) -> None:
     )
 
     with st.form("add_batch_form"):
-        name = st.text_input("食材名称", key="add_name")
+        st.caption("带「必填」的字段必须填写；其余可使用默认值。每次保存都会新增一条独立批次。")
+        name = st.text_input("食材名称（必填）", key="add_name")
         col1, col2, col3 = st.columns(3)
         with col1:
             category = st.selectbox("类别", list(CATEGORIES), key="add_category")
@@ -209,7 +210,9 @@ def _render_add(conn: sqlite3.Connection) -> None:
             unit = st.selectbox("单位", list(UNITS), key="add_unit")
         with col3:
             storage = st.selectbox("储存方式", list(STORAGE_KINDS), key="add_storage")
-        quantity = st.number_input("数量", value=1.0, step=0.5, format="%g", key="add_quantity")
+        quantity = st.number_input(
+            "数量（必填，大于 0）", value=1.0, step=0.5, format="%g", key="add_quantity"
+        )
         st.caption(
             "保质期只记录你提供的信息：只填天数不会生成正式有效期。"
             "没有明确有效期时，系统最多给出「AI 估算」，仅供参考，不是食品安全保证。"

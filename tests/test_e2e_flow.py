@@ -229,3 +229,12 @@ def test_seed_demo_script_imports_and_resets_a_temp_database(tmp_db_path, monkey
         assert len(inventory_service.list_batches(conn)) == seeded
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("script", ["app.py", "pages/1_数字冰箱.py", "pages/2_食谱规划.py"])
+def test_entry_scripts_compile(script: str) -> None:
+    """语法级守卫：AppTest 不会因为脚本编译失败而报 exception，必须单独检查。"""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / script).read_text(encoding="utf-8")
+    compile(source, script, "exec")
