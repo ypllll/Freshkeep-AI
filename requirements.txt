@@ -8,5 +8,5 @@ pytest>=8.0
 openai>=1.0            # 通过 base_url 调用 OpenAI 兼容接口
 python-dotenv>=1.0     # 从 .env 读取 AI 配置（缺失时应用仍可启动）
 
-# 阶段 5 起才会加入：
-#   pydantic          用于 AI 输出的严格结构校验
+# 阶段 5：菜谱输出校验（显式声明，不依赖 openai 的传递依赖）
+pydantic>=2.0,<3

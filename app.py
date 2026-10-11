@@ -1,8 +1,7 @@
-"""FreshKeep AI —— Streamlit 入口。
+"""FreshKeep AI —— Streamlit 入口（首页）。
 
 职责边界（docs/architecture.md 第 4 节）：UI 只做输入与展示，不含业务规则，
-也不直接访问存储层。数据库初始化由 `storage.db.initialize_database()` 提供，
-第一个调用者是阶段 2 的 `services` 层。
+也不直接访问存储层。本页只显示进度、导航提示与只读运行参数。
 """
 
 from __future__ import annotations
@@ -10,6 +9,7 @@ from __future__ import annotations
 import streamlit as st
 
 import config
+from services import ai_service
 
 st.set_page_config(page_title="FreshKeep AI", layout="centered")
 
@@ -18,16 +18,17 @@ st.caption("数字化管理冰箱里的食材，并根据真实库存规划菜�
 
 st.subheader("当前进度")
 st.write(
-    "**阶段 1：骨架与持久化底座** —— 目录骨架、运行配置与 SQLite 版本化迁移机制已就绪。"
+    "**阶段 5：菜谱规划与食材约束** —— 已实现到"根据真实库存生成并校验菜谱候选"这一步。"
 )
 
 st.markdown(
     """
-- 数字冰箱（批次入库 / 查看 / 消耗 / 丢弃）：阶段 2
-- 保质期与过敏原规则：阶段 3
-- AI 连接层与输出校验：阶段 4
-- 食谱规划：阶段 5
-- 确认消耗与演示加固：阶段 6
+- **数字冰箱**（侧边栏）：批次入库、查看汇总与明细、消耗 / 丢弃、修改数量、事件记录
+- **保质期**：用户填写的有效期原样保存；只填天数不生成正式期限；没有明确期限时给出标注清楚的「AI 估算」
+- **过敏原**：维护个人过敏原清单，逐批次判定"已确认冲突 / 待核实 / 未发现已知冲突"
+- **食谱规划**（侧边栏）：按需求调用模型生成菜谱候选，再由程序计算库存缺口与过敏原结论
+
+尚未实现：确认实际消耗并扣减库存（阶段 6）、演示数据脚本。
 """
 )
 
@@ -36,8 +37,9 @@ with st.expander("运行参数（只读）"):
     st.write(
         f"临期阈值 `DUE_SOON_DAYS`：{config.DUE_SOON_DAYS}（固定业务常量，不提供配置）"
     )
+    st.write("AI 模型配置：" + ai_service.describe_configuration())
 
 st.info(
-    "本阶段只提供界面骨架，尚未读写任何库存数据：库存操作会在后续阶段经服务层实现，"
-    "不会由界面直接访问数据库。"
+    "库存与菜谱规划都不会由界面直接访问数据库或模型接口：页面只调用服务层。"
+    "菜谱规划只读取库存，不会扣减；确认消耗会在后续阶段实现。"
 )
