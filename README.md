@@ -34,14 +34,39 @@ streamlit run app.py
 
 启动后：首页 `app.py` 只展示项目进度与只读运行参数；点击侧边栏进入 **数字冰箱** 页面即可实际录入与操作数据。占位页面（食谱规划）还没有功能。
 
-> 注意：首页 `app.py` 里的进度文案尚未同步到阶段 2，仍写着阶段 1 的说明。该文件不在本阶段的允许修改范围内，待后续授权后再更新。
+> 注意：首页 `app.py` 里的进度文案仍停留在阶段 1，尚未同步。该文件不在已授权的修改范围内，待后续授权后再更新。
 
 ### 配置
 
-- 唯一会被读取的环境变量是 **`DATABASE_PATH`**（SQLite 文件路径，默认 `data/freshkeep.db`，相对于项目根目录）。
-- 目前**不会自动加载 `.env` 文件**：`.env.example` 只是模板，自动加载要等阶段 4 引入 `python-dotenv` 之后才生效。现阶段请直接设置 shell 环境变量，例如 `$env:DATABASE_PATH = "D:\freshkeep.db"`。
-- `DUE_SOON_DAYS = 2` 是固定业务常量，不提供配置项，也无法用环境变量覆盖。
-- `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` 等变量在阶段 4 才会用到，现在无需设置。
+项目根目录的 **`.env`** 会被自动读取（`python-dotenv`，按需加载、缺失时静默跳过）；`.env` 已在 `.gitignore` 中排除。复制模板后填写：
+
+```bash
+cp .env.example .env        # Windows: copy .env.example .env
+```
+
+```ini
+# .env（仅示例，请替换成你自己的服务信息）
+OPENAI_API_KEY=your_api_key
+OPENAI_BASE_URL=https://your-compatible-api-endpoint.example/v1
+OPENAI_MODEL=your-model-name
+AI_TIMEOUT_SECONDS=30
+```
+
+| 变量 | 作用 | 缺省行为 |
+|---|---|---|
+| `DATABASE_PATH` | SQLite 文件路径 | 默认 `data/freshkeep.db`（相对项目根目录） |
+| `OPENAI_API_KEY` | 模型 API Key | 留空也能启动应用；只有真正调用模型时才提示缺少配置 |
+| `OPENAI_BASE_URL` | OpenAI 兼容服务地址 | 留空时使用 SDK 默认地址 |
+| `OPENAI_MODEL` | 模型名 | 留空时调用会报"缺少 `OPENAI_MODEL`" |
+| `AI_TIMEOUT_SECONDS` | 单次请求超时秒数 | 默认 30；写成非法值也会回退到 30，不会崩溃 |
+
+`DUE_SOON_DAYS = 2` 是固定业务常量，不提供配置项，也无法用环境变量覆盖。
+
+`.env` 里的密钥不会被打印：错误信息与配置摘要都只显示"已配置/未配置"。想手动验证联通性（会发起一次真实请求）：
+
+```bash
+python scripts/check_ai_connection.py
+```
 
 ## 测试
 
@@ -49,7 +74,7 @@ streamlit run app.py
 python -m pytest --basetemp=.pytest_tmp
 ```
 
-当前结果：**237 passed**（失败 0、错误 0，约 8 秒）。
+当前结果：**284 passed**（失败 0、错误 0，约 9 秒）。
 
 | 测试文件 | 通过 | 覆盖范围 |
 |---|---|---|
@@ -61,9 +86,12 @@ python -m pytest --basetemp=.pytest_tmp
 | `tests/test_dates.py` | 49 | 有效期优先级、天数不换算成正式日期、冲突提示、通用参考区间、AI 估算、新鲜度边界、展示来源以库中值为准 |
 | `tests/test_allergens.py` | 42 | 别名与复合调味料、三态判定、按批次独立、用户清单持久化、v2→v3 迁移与失败回滚 |
 | `tests/test_fridge_page.py` | 4 | 界面层（Streamlit `AppTest`）：购买日期可留空、AI 估算单独展示、正式有效期保持未知、冲突提示刷新后仍可见 |
+| `tests/test_ai_client.py` | 47 | AI 配置读取（含非法超时回退）、缺配置错误、请求参数透传、文本提取、空回复、超时/连接/API 错误映射、密钥不泄露；全部用假 SDK，不联网 |
 
 `tests/test_fridge_page.py` 是本修复轮新增的界面层测试：它用 Streamlit 官方 `AppTest` 真正执行
 `pages/1_数字冰箱.py`，覆盖只能在界面上观察到的语义。
+
+`tests/test_ai_client.py` 全程使用假 SDK 与注入的假客户端：**不会发送任何真实网络请求，也不需要真实 API Key**。
 
 两点使用说明：
 
@@ -89,9 +117,13 @@ FreshKeep AI/
 │  ├─ dates.py                   保质期判定、冲突处理、通用参考区间、AI 估算（只展示）
 │  ├─ models.py                  数据类与取值白名单
 │  └─ validation.py              输入校验与名称归一化
+├─ ai/                           AI 接入层（不依赖 Streamlit 与数据库）
+│  ├─ __init__.py
+│  └─ client.py                  OpenAI 兼容客户端：generate(messages) -> str，错误映射为 AIError
 ├─ services/
 │  ├─ __init__.py
-│  └─ inventory_service.py       入库 / 查询 / 修改 / 消耗 / 丢弃的编排与事务边界
+│  ├─ inventory_service.py       入库 / 查询 / 修改 / 消耗 / 丢弃的编排与事务边界
+│  └─ ai_service.py              AI 配置与调用的唯一入口（界面只经此调用模型）
 ├─ storage/
 │  ├─ __init__.py
 │  ├─ db.py                      SQLite 连接、显式事务、版本化迁移
@@ -101,6 +133,8 @@ FreshKeep AI/
 ├─ pages/
 │  ├─ 1_数字冰箱.py              数字冰箱页面（阶段 2/3 功能）
 │  └─ 2_食谱规划.py              占位页面（阶段 5）
+├─ scripts/
+│  └─ check_ai_connection.py     手动联通性检查（不在 pytest 中运行）
 ├─ docs/
 │  ├─ product_spec.md            产品规格与业务规则 R-01 ~ R-30
 │  └─ architecture.md            分层、数据模型、迁移策略、测试策略、阶段白名单
@@ -113,7 +147,8 @@ FreshKeep AI/
    ├─ test_inventory_service.py
    ├─ test_dates.py
    ├─ test_allergens.py
-   └─ test_fridge_page.py
+   ├─ test_fridge_page.py
+   └─ test_ai_client.py
 ```
 
 依赖方向：`pages/ → services/ → {core/, storage/}`；`core/` 不依赖 `storage/` 与 `ai/`（`ai/` 尚未创建）。
@@ -141,6 +176,17 @@ FreshKeep AI/
 
 已知限制：不做单位换算，同名不同单位分开汇总；通用参考区间与 AI 估算都是粗略经验值（来源待补）、不构成食品安全依据；AI 估算不使用用户填写的天数，只看类别与储存方式；过敏原别名表与复合调味料清单覆盖有限，未命中只表示"未发现已知冲突"。
 
+## AI 模型接入（阶段 4，仅基础设施）
+
+本阶段只建立可复用的调用底座，**还没有任何面向用户的 AI 功能**（菜谱规划在阶段 5）。
+
+- `config.get_ai_settings()` 读取 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` / `AI_TIMEOUT_SECONDS`；
+  `.env` 由 `python-dotenv` 按需加载。缺配置不影响启动，只在调用时报错。
+- `ai/client.py` 的 `AIClient.generate(messages) -> str`：一次调用、带超时、只返回文本，不重试、不打印、不写库。
+- `services/ai_service.py` 是界面唯一入口：`is_configured()` / `describe_configuration()` / `generate_text(messages)`。
+- 错误分类：`AIMisconfiguredError`、`AIInvalidRequestError`、`AITimeoutError`、`AIConnectionError`、`AIAPIError`（带 `status_code`）、`AIEmptyResponseError`；错误信息不含 API Key。
+- 手动验证：`python scripts/check_ai_connection.py`（需要先配好 `.env`，会发起一次真实请求）。
+
 ## 数据库
 
 - 结构由 `PRAGMA user_version` 版本化管理，当前版本为 **3**：
@@ -156,11 +202,10 @@ FreshKeep AI/
 | 阶段 | 内容 | 对应页面/模块现状 |
 |---|---|---|
 | 3（菜谱侧） | 待核实区域分流：把 `unverifiable` 的菜谱与普通推荐分开 | 领域判定已在阶段 3 完成；菜谱侧分流要等阶段 5 |
-| 4 | OpenAI 兼容 API 客户端、AI 输出结构校验 | `ai/` 尚未创建；`requirements.txt` 里还没有 openai / pydantic |
-| 5 | 食谱规划：候选菜谱、推荐理由、现有量/需求量/缺少量/补购建议、份数缩放 | `pages/2_食谱规划.py` 仅为占位 |
+| 5 | 食谱规划：候选菜谱、推荐理由、现有量/需求量/缺少量/补购建议、份数缩放；以及 AI 输出结构校验（`ai/schemas.py`）与提示词（`ai/prompts.py`） | 客户端底座已在阶段 4 就绪；`pages/2_食谱规划.py` 仅为占位 |
 | 6 | 确认菜谱实际消耗并更新库存、演示数据脚本、端到端加固 | `scripts/` 尚未创建 |
 
-因此当前**没有接入任何大模型、没有菜谱规划、没有菜谱级过敏原分流**；日期里的「AI 估算」是本地经验规则，不是模型输出。
+因此当前**没有菜谱规划、没有菜谱级过敏原分流**；日期里的「AI 估算」是本地经验规则，不是模型输出。模型的调用底座已经可用，但还没有任何界面功能使用它。
 
 ## 文档索引
 
@@ -223,7 +268,7 @@ FreshKeep AI/
 | 1 | 骨架与持久化底座 | 已完成 |
 | 2 | 数字冰箱核心 | 已完成 |
 | 3 | 日期与过敏原 | 已完成，等待审核 |
-| 4 | AI 连接层 | 未开始 |
+| 4 | AI 接入层 | 已完成，等待审核 |
 | 5 | 食谱规划 | 未开始 |
 | 6 | 确认消耗与加固 | 未开始 |
 

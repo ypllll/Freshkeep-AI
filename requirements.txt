@@ -4,7 +4,9 @@
 streamlit>=1.36
 pytest>=8.0
 
-# 阶段 4 起才会加入（届时在本文件中追加）：
-#   openai            用于调用 OpenAI 兼容 API
+# 阶段 4：AI 模型接入层
+openai>=1.0            # 通过 base_url 调用 OpenAI 兼容接口
+python-dotenv>=1.0     # 从 .env 读取 AI 配置（缺失时应用仍可启动）
+
+# 阶段 5 起才会加入：
 #   pydantic          用于 AI 输出的严格结构校验
-#   python-dotenv     用于从 .env 读取密钥
