@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 本地配置与密钥
+.env
+
+# 运行数据（演示数据库等）；演示数据声明为可丢弃
+data/
+
+# Streamlit 本地密钥
+.streamlit/secrets.toml
+
+# 项目内 pytest 临时目录（系统临时目录不可用时通过 --basetemp 使用）
+.pytest_tmp/

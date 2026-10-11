@@ -1,0 +1,10 @@
+# FreshKeep AI 依赖（按阶段逐步增加，见 docs/architecture.md 第 13 节）
+
+# 阶段 1：界面骨架与测试
+streamlit>=1.36
+pytest>=8.0
+
+# 阶段 4 起才会加入（届时在本文件中追加）：
+#   openai            用于调用 OpenAI 兼容 API
+#   pydantic          用于 AI 输出的严格结构校验
+#   python-dotenv     用于从 .env 读取密钥
